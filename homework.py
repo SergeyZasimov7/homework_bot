@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from requests import HTTPError
 from telebot import TeleBot
 
+
 load_dotenv()
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
