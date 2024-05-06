@@ -170,6 +170,8 @@ def main():
 
 
 class TestNetworkError(TestCase):
+    """Проверка обработки ошибки соединения с сетью."""
+
     @mock.patch('requests.get')
     def test_network_error(self, mock_get):
         mock_get.side_effect = requests.RequestException(NETWORK_ERROR_MESSAGE)
@@ -177,6 +179,8 @@ class TestNetworkError(TestCase):
 
 
 class TestServerError(TestCase):
+    """Проверка обработки ошибки сервера."""
+
     @mock.patch('requests.get')
     def test_server_error(self, mock_get):
         mock_response = mock.Mock()
@@ -186,6 +190,8 @@ class TestServerError(TestCase):
 
 
 class TestUnexpectedStatusCode(TestCase):
+    """Проверка обработки ошибки неожиданного статуса."""
+
     @mock.patch('requests.get')
     def test_unexpected_status_code(self, mock_get):
         mock_response = mock.Mock()
@@ -206,6 +212,8 @@ class TestUnexpectedHomeworkStatus(TestCase):
 
 
 class TestInvalidJson(TestCase):
+    """Проверка обработки ошибки неожиданного статуса ДЗ."""
+
     @mock.patch('requests.get')
     def test_invalid_json(self, mock_get):
         mock_response = mock.Mock()
