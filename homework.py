@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from requests import HTTPError
 from telebot import TeleBot
 
-
 load_dotenv()
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
@@ -174,6 +173,11 @@ class TestNetworkError(TestCase):
 
     @mock.patch('requests.get')
     def test_network_error(self, mock_get):
+        """Сбой сети.
+
+        Проверяет, что при ошибке соединения с сетью вызывается выход из
+        программы.
+        """
         mock_get.side_effect = requests.RequestException(NETWORK_ERROR_MESSAGE)
         main()
 
@@ -183,6 +187,10 @@ class TestServerError(TestCase):
 
     @mock.patch('requests.get')
     def test_server_error(self, mock_get):
+        """Отказ сервера.
+
+        Проверяет, что при ошибке сервера вызывается выход из программы.
+        """
         mock_response = mock.Mock()
         mock_response.json.return_value = {'error': 'Ошибка сервера'}
         mock_get.return_value = mock_response
@@ -194,6 +202,11 @@ class TestUnexpectedStatusCode(TestCase):
 
     @mock.patch('requests.get')
     def test_unexpected_status_code(self, mock_get):
+        """Неожиданный статус ответа (=код-возврата).
+
+        Проверяет, что при получении неожиданного статуса ответа от сервера
+        вызывается выход из программы.
+        """
         mock_response = mock.Mock()
         mock_response.status_code = 404
         mock_get.return_value = mock_response
@@ -201,8 +214,15 @@ class TestUnexpectedStatusCode(TestCase):
 
 
 class TestUnexpectedHomeworkStatus(TestCase):
+    """Проверка обработки ошибки неожиданного статуса ДЗ."""
+
     @mock.patch('requests.get')
     def test_unexpected_homework_status(self, mock_get):
+        """Неожиданный статус домашки.
+
+        Проверяет, что при получении неожиданного статуса ДЗ вызывается выход
+        из программы.
+        """
         mock_response = mock.Mock()
         mock_response.json.return_value = {
             'homeworks': [{'homework_name': 'hw1', 'status': 'unknown'}]
@@ -212,10 +232,15 @@ class TestUnexpectedHomeworkStatus(TestCase):
 
 
 class TestInvalidJson(TestCase):
-    """Проверка обработки ошибки неожиданного статуса ДЗ."""
+    """Проверка обработки ошибки некорректного ответа от сервера."""
 
     @mock.patch('requests.get')
     def test_invalid_json(self, mock_get):
+        """Некорректный json.
+
+        Проверяет, что при получении некорректного ответа от сервера
+        (невозможно распарсить JSON) вызывается выход из программы
+        """
         mock_response = mock.Mock()
         mock_response.json.return_value = {'homeworks': 1}
         mock_get.return_value = mock_response
