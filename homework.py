@@ -1,10 +1,17 @@
 import logging
 import os
 import time
+from http import HTTPStatus
+from logging.handlers import RotatingFileHandler
+from unittest import TestCase
+from unittest import main as uni_main
+from unittest import mock
 
 import requests
 from dotenv import load_dotenv
+from requests import HTTPError
 from telebot import TeleBot
+
 
 load_dotenv()
 
@@ -23,10 +30,26 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
+
+MISSING_TOKENS_MESSAGE = 'Отсутствуют обязательные переменные окружения: {}'
+BOT_SENT_MESSAGE_TEMPLATE = 'Бот отправил сообщение: {}'
+SEND_MESSAGE_ERROR_TEMPLATE = 'Сбой при отправке сообщения: {}'
+REQUEST_ERROR_MESSAGE = 'Сбой в работе программы: {}'
+API_STATUS_CODE_ERROR = (
+    'Код ответа API: {}. Запрос: {}, заголовки: {}, параметры: {}'
 )
+API_RESPONSE_ERROR = 'API вернуло ошибку: {} - {}'
+RESPONSE_NOT_DICT_MESSAGE = 'Ответ API не является словарем: {}'
+RESPONSE_MISSING_KEYS_MESSAGE = 'Отсутствуют ожидаемые ключи в ответе API: {}'
+RESPONSE_HOMEWORKS_NOT_LIST_MESSAGE = (
+    'Некорректный формат данных домашних работ '
+    '(ожидается список, получено {}): {}'
+)
+MISSING_HOMEWORK_NAME_MESSAGE = 'Отсутствует название домашней работы: {}'
+MISSING_HOMEWORK_STATUS_MESSAGE = 'Отсутствует статус домашней работы: {}'
+UNEXPECTED_HOMEWORK_STATUS_MESSAGE = 'Неожиданный статус работы: {}'
+NO_NEW_UPDATES_MESSAGE = 'Нет новых обновлений'
+NETWORK_ERROR_MESSAGE = "Сетевая ошибка"
 
 
 def check_tokens():
@@ -35,7 +58,7 @@ def check_tokens():
     missing_tokens = [token for token in tokens if not token]
     if missing_tokens:
         logging.critical(
-            f"Отсутствуют обязательные переменные окружения: {missing_tokens}"
+            MISSING_TOKENS_MESSAGE.format(missing_tokens)
         )
         return False
     return True
@@ -45,9 +68,9 @@ def send_message(bot, message):
     """Отправляет сообщение в Telegram-чат."""
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logging.debug(f'Бот отправил сообщение: "{message}"')
+        logging.debug(BOT_SENT_MESSAGE_TEMPLATE.format(message))
     except Exception as error:
-        logging.error(f"Сбой при отправке сообщения: {error}")
+        logging.exception(SEND_MESSAGE_ERROR_TEMPLATE.format(error))
 
 
 def get_api_answer(timestamp):
@@ -58,48 +81,76 @@ def get_api_answer(timestamp):
             headers=HEADERS,
             params={'from_date': timestamp}
         )
-        if response.status_code != 200:
-            raise TypeError(f'Код ответа API: {response.status_code}')
-        return response.json()
     except requests.RequestException as error:
-        logging.error(f'Сбой в работе программы: {error}')
+        raise RuntimeError(REQUEST_ERROR_MESSAGE.format(error))
+    if response.status_code != HTTPStatus.OK:
+        raise HTTPError(
+            API_STATUS_CODE_ERROR.format(
+                response.status_code,
+                ENDPOINT,
+                HEADERS,
+                {'from_date': timestamp}
+            )
+        )
+    json_response = response.json()
+    if 'code' in json_response or 'error' in json_response:
+        raise HTTPError(
+            API_RESPONSE_ERROR.format(
+                json_response.get('code'), json_response.get('error')
+            )
+        )
+    return json_response
 
 
 def check_response(response):
     """Проверяет ответ API на корректность."""
-    expected_keys = ['homeworks', 'current_date']
-    if not all(key in response for key in expected_keys):
-        logging.error(f"Отсутствуют ожидаемые ключи в ответе API: {response}")
-        raise TypeError("Некорректный ответ API")
+    if not isinstance(response, dict):
+        raise TypeError(RESPONSE_NOT_DICT_MESSAGE.format(response))
+    expected_keys = {'homeworks'}
+    if not expected_keys.issubset(response):
+        raise ValueError(RESPONSE_MISSING_KEYS_MESSAGE.format(response))
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
-        logging.error("Некорректный формат данных домашних работ в ответе API")
-        raise TypeError("Некорректный формат данных домашних работ")
+        raise TypeError(
+            RESPONSE_HOMEWORKS_NOT_LIST_MESSAGE.format(
+                type(homeworks),
+                homeworks
+            )
+        )
     return homeworks
 
 
 def parse_status(homework):
     """Извлекает статус из информации о домашней работе."""
-    homework_name = homework.get('homework_name')
-    homework_status = homework.get('status')
-    if homework_name is None or homework_status is None:
-        logging.error(
-            f"Отсутствуют данные о названии или статусе работы: {homework}"
-        )
-        raise Exception("Неполные данные о домашней работе")
-    verdict = HOMEWORK_VERDICTS.get(homework_status)
-    if verdict is None:
-        logging.error(f"Неожиданный статус работы: {homework_status}")
-        raise Exception(
-            f"Неизвестный статус домашней работы: {homework['status']}"
-        )
-    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+    name = homework.get('homework_name')
+    status = homework.get('status')
+    if 'homework_name' not in homework:
+        raise TypeError(MISSING_HOMEWORK_NAME_MESSAGE.format(homework))
+    if 'status' not in homework:
+        raise TypeError(MISSING_HOMEWORK_STATUS_MESSAGE.format(homework))
+    if status not in HOMEWORK_VERDICTS:
+        raise TypeError(UNEXPECTED_HOMEWORK_STATUS_MESSAGE.format(status))
+    verdict = HOMEWORK_VERDICTS.get(status)
+    return f'Изменился статус проверки работы "{name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
     if not check_tokens():
-        exit(1)
+        return
+    log_file = os.path.join(os.path.dirname(__file__), 'bot.log')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
+    handlers = [
+        logging.StreamHandler(),
+        RotatingFileHandler(log_file, maxBytes=100000, backupCount=5)
+    ]
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=formatter,
+        handlers=handlers
+    )
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     while True:
@@ -108,17 +159,60 @@ def main():
             homeworks = check_response(response)
             if homeworks:
                 send_message(bot, parse_status(homeworks[0]))
-                timestamp = response.get('current_date')
+                timestamp = response.get('current_date', timestamp)
             else:
-                logging.debug('Нет новых обновлений')
-
-            time.sleep(RETRY_PERIOD)
+                logging.debug(NO_NEW_UPDATES_MESSAGE)
         except Exception as error:
-            message = f'Сбой в работе программы: {error}'
+            message = REQUEST_ERROR_MESSAGE.format(error)
             logging.error(message)
             send_message(bot, message)
-            time.sleep(RETRY_PERIOD)
+        time.sleep(RETRY_PERIOD)
+
+
+class TestNetworkError(TestCase):
+    @mock.patch('requests.get')
+    def test_network_error(self, mock_get):
+        mock_get.side_effect = requests.RequestException(NETWORK_ERROR_MESSAGE)
+        main()
+
+
+class TestServerError(TestCase):
+    @mock.patch('requests.get')
+    def test_server_error(self, mock_get):
+        mock_response = mock.Mock()
+        mock_response.json.return_value = {'error': 'Ошибка сервера'}
+        mock_get.return_value = mock_response
+        main()
+
+
+class TestUnexpectedStatusCode(TestCase):
+    @mock.patch('requests.get')
+    def test_unexpected_status_code(self, mock_get):
+        mock_response = mock.Mock()
+        mock_response.status_code = 404
+        mock_get.return_value = mock_response
+        main()
+
+
+class TestUnexpectedHomeworkStatus(TestCase):
+    @mock.patch('requests.get')
+    def test_unexpected_homework_status(self, mock_get):
+        mock_response = mock.Mock()
+        mock_response.json.return_value = {
+            'homeworks': [{'homework_name': 'hw1', 'status': 'unknown'}]
+        }
+        mock_get.return_value = mock_response
+        main()
+
+
+class TestInvalidJson(TestCase):
+    @mock.patch('requests.get')
+    def test_invalid_json(self, mock_get):
+        mock_response = mock.Mock()
+        mock_response.json.return_value = {'homeworks': 1}
+        mock_get.return_value = mock_response
+        main()
 
 
 if __name__ == '__main__':
-    main()
+    uni_main()
