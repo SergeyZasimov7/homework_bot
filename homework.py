@@ -3,6 +3,7 @@ import os
 import time
 from http import HTTPStatus
 from logging.handlers import RotatingFileHandler
+import sys
 
 import requests
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
+TOKEN_NAMES = ['PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID']
 
 HOMEWORK_VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
@@ -39,7 +41,7 @@ RESPONSE_NOT_DICT_MESSAGE = 'Ответ API не является словаре
 RESPONSE_MISSING_KEYS_MESSAGE = 'Отсутствуют ожидаемые ключи в ответе API: {}'
 RESPONSE_HOMEWORKS_NOT_LIST_MESSAGE = (
     'Некорректный формат данных домашних работ '
-    '(ожидается список, получено {}): {}'
+    '(ожидается список, получено {})'
 )
 MISSING_HOMEWORK_NAME_MESSAGE = (
     "Отсутствует ключ 'homework_name' в информации о домашней работе."
@@ -61,20 +63,13 @@ class APIRequestError(Exception):
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    missing_tokens = [token for token in tokens if not token]
-    missing_tokens_names = ', '.join([token_name for token_name, token in zip(
-        ['PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID'],
-        tokens
-    ) if not token])
-    if missing_tokens:
-        logging.critical(
-            f"{MISSING_TOKENS_MESSAGE} {missing_tokens_names}"
-        )
-        raise EnvironmentError(
-            f"{MISSING_TOKENS_MESSAGE} {missing_tokens_names}"
-        )
-    return True
+    missing_tokens_names = ', '.join(
+        name for name in TOKEN_NAMES if not globals()[name]
+    )
+    if missing_tokens_names:
+        message = MISSING_TOKENS_MESSAGE.format(missing_tokens_names)
+        logging.critical(message)
+        raise EnvironmentError(message)
 
 
 def send_message(bot, message):
@@ -82,35 +77,41 @@ def send_message(bot, message):
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logging.debug(BOT_SENT_MESSAGE_TEMPLATE.format(message))
+        return True
     except Exception as error:
         logging.exception(SEND_MESSAGE_ERROR_TEMPLATE.format(error, message))
+        return False
 
 
 def get_api_answer(timestamp):
     """Делает запрос к API-сервису."""
-    params = {'from_date': timestamp}
-    request_params = dict(url=ENDPOINT, headers=HEADERS, params=params)
+    request_params = dict(
+        url=ENDPOINT,
+        headers=HEADERS,
+        params={'from_date': timestamp}
+    )
 
     try:
-        response = requests.get(*request_params)
+        response = requests.get(**request_params)
     except requests.RequestException as error:
         raise ConnectionError(
-            REQUEST_ERROR_MESSAGE.format(error=error, *request_params)
+            REQUEST_ERROR_MESSAGE.format(error=error, **request_params)
         )
 
     if response.status_code != HTTPStatus.OK:
         raise APIRequestError(
             API_STATUS_CODE_ERROR.format(
                 response.status_code,
-                *request_params
+                **request_params
             )
         )
     json_response = response.json()
     if 'code' in json_response or 'error' in json_response:
+        error_key = 'code' if 'code' in json_response else 'error'
         raise APIRequestError(
             API_RESPONSE_ERROR.format(
-                json_response.get('code'),
-                json_response.get('error'),
+                json_response.get(error_key),
+                error_key,
                 *request_params
             )
         )
@@ -122,13 +123,12 @@ def check_response(response):
     if not isinstance(response, dict):
         raise TypeError(RESPONSE_NOT_DICT_MESSAGE.format(type(response)))
     if 'homeworks' not in response:  # Проверяем наличие ключа 'homeworks'
-        raise ValueError(RESPONSE_MISSING_KEYS_MESSAGE.format(response))
+        raise KeyError(RESPONSE_MISSING_KEYS_MESSAGE)
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
         raise TypeError(
             RESPONSE_HOMEWORKS_NOT_LIST_MESSAGE.format(
-                type(homeworks),
-                homeworks
+                type(homeworks)
             )
         )
     return homeworks
@@ -136,7 +136,6 @@ def check_response(response):
 
 def parse_status(homework):
     """Извлекает статус из информации о домашней работе."""
-    name = homework.get('homework_name')
     status = homework.get('status')
     if 'homework_name' not in homework:
         raise KeyError(MISSING_HOMEWORK_NAME_MESSAGE)
@@ -144,7 +143,10 @@ def parse_status(homework):
         raise KeyError(MISSING_HOMEWORK_STATUS_MESSAGE)
     if status not in HOMEWORK_VERDICTS:
         raise ValueError(UNEXPECTED_HOMEWORK_STATUS_MESSAGE.format(status))
-    return STATUS_CHANGED_MESSAGE.format(name, HOMEWORK_VERDICTS.get(status))
+    return STATUS_CHANGED_MESSAGE.format(
+        homework.get('homework_name'),
+        HOMEWORK_VERDICTS.get(status)
+    )
 
 
 def main():
@@ -158,27 +160,32 @@ def main():
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
             if homeworks:
-                send_message(bot, parse_status(homeworks[0]))
-                timestamp = response.get('current_date', timestamp)
+                is_success = send_message(bot, parse_status(homeworks[0]))
+                if is_success:
+                    timestamp = response.get('current_date', timestamp)
+                    last_error_message = None
             else:
                 logging.debug(NO_NEW_UPDATES_MESSAGE)
         except Exception as error:
             error_message = REQUEST_ERROR_MESSAGE.format(error)
+            logging.error(error_message)
             if error_message != last_error_message:
-                logging.error(error_message)
                 send_message(bot, error_message)
                 last_error_message = error_message
         time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
-    log_file = os.path.join(os.path.dirname(__file__), 'bot.log')
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
     )
     handlers = [
-        logging.StreamHandler(),
-        RotatingFileHandler(log_file, maxBytes=100000, backupCount=5)
+        logging.StreamHandler(sys.stdout),
+        RotatingFileHandler(
+            os.path.join(os.path.dirname(__file__), 'bot.log'),
+            maxBytes=100000,
+            backupCount=5
+        )
     ]
     logging.basicConfig(
         level=logging.DEBUG,
