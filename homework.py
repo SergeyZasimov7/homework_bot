@@ -106,15 +106,15 @@ def get_api_answer(timestamp):
             )
         )
     json_response = response.json()
-    if 'code' in json_response or 'error' in json_response:
-        error_key = 'code' if 'code' in json_response else 'error'
-        raise APIRequestError(
-            API_RESPONSE_ERROR.format(
-                json_response.get(error_key),
-                error_key,
-                *request_params
+    for error_key in ['code', 'error']:
+        if error_key in json_response:
+            raise APIRequestError(
+                API_RESPONSE_ERROR.format(
+                    json_response.get(error_key),
+                    error_key,
+                    **request_params
+                )
             )
-        )
     return json_response
 
 
@@ -122,7 +122,7 @@ def check_response(response):
     """Проверяет ответ API на корректность."""
     if not isinstance(response, dict):
         raise TypeError(RESPONSE_NOT_DICT_MESSAGE.format(type(response)))
-    if 'homeworks' not in response:  # Проверяем наличие ключа 'homeworks'
+    if 'homeworks' not in response:
         raise KeyError(RESPONSE_MISSING_KEYS_MESSAGE)
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
@@ -159,11 +159,9 @@ def main():
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
-            if homeworks:
-                is_success = send_message(bot, parse_status(homeworks[0]))
-                if is_success:
-                    timestamp = response.get('current_date', timestamp)
-                    last_error_message = None
+            if homeworks and send_message(bot, parse_status(homeworks[0])):
+                timestamp = response.get('current_date', timestamp)
+                last_error_message = None
             else:
                 logging.debug(NO_NEW_UPDATES_MESSAGE)
         except Exception as error:
@@ -171,25 +169,23 @@ def main():
             logging.error(error_message)
             if error_message != last_error_message:
                 send_message(bot, error_message)
-                last_error_message = error_message
+            last_error_message = error_message
         time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
-    formatter = logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
-    )
-    handlers = [
-        logging.StreamHandler(sys.stdout),
-        RotatingFileHandler(
-            os.path.join(os.path.dirname(__file__), 'bot.log'),
-            maxBytes=100000,
-            backupCount=5
-        )
-    ]
     logging.basicConfig(
         level=logging.DEBUG,
-        format=formatter,
-        handlers=handlers
+        format=logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s' 
+        ),
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            RotatingFileHandler(
+                os.path.join(os.path.dirname(__file__), 'bot.log'),
+                maxBytes=100000,
+                backupCount=5
+            )
+        ]
     )
     main()
