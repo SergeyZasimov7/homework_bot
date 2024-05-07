@@ -176,8 +176,10 @@ def main():
 if __name__ == '__main__':
     logging.basicConfig(
         level=logging.DEBUG,
-        format=logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s' 
+        format=(
+            '%(asctime)s - %(levelname)s - '
+            '%(funcName)s:%(lineno)d - '
+            '%(message)s'
         ),
         handlers=[
             logging.StreamHandler(sys.stdout),
