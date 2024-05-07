@@ -54,6 +54,7 @@ STATUS_CHANGED_MESSAGE = 'Изменился статус проверки ра�
 
 
 class APIRequestError(Exception):
+    """Исключение при ошибке запроса к API."""
     pass
 
 
@@ -90,7 +91,7 @@ def get_api_answer(timestamp):
     request_params = dict(url=ENDPOINT, headers=HEADERS, params=params)
 
     try:
-        response = requests.get(*request_params) 
+        response = requests.get(*request_params)
     except requests.RequestException as error:
         raise ConnectionError(
             REQUEST_ERROR_MESSAGE.format(error=error, *request_params)
@@ -170,7 +171,7 @@ def main():
 
 
 if __name__ == '__main__':
-    log_file = os.path.join(os.path.dirname(__file__), 'bot.log') 
+    log_file = os.path.join(os.path.dirname(__file__), 'bot.log')
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
     )
