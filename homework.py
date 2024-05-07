@@ -3,13 +3,9 @@ import os
 import time
 from http import HTTPStatus
 from logging.handlers import RotatingFileHandler
-from unittest import TestCase
-from unittest import main as uni_main
-from unittest import mock
 
 import requests
 from dotenv import load_dotenv
-from requests import HTTPError
 from telebot import TeleBot
 
 
@@ -45,22 +41,37 @@ RESPONSE_HOMEWORKS_NOT_LIST_MESSAGE = (
     'Некорректный формат данных домашних работ '
     '(ожидается список, получено {}): {}'
 )
-MISSING_HOMEWORK_NAME_MESSAGE = 'Отсутствует название домашней работы: {}'
-MISSING_HOMEWORK_STATUS_MESSAGE = 'Отсутствует статус домашней работы: {}'
+MISSING_HOMEWORK_NAME_MESSAGE = (
+    "Отсутствует ключ 'homework_name' в информации о домашней работе."
+)
+MISSING_HOMEWORK_STATUS_MESSAGE = (
+    "Отсутствует ключ 'status' в информации о домашней работе."
+)
 UNEXPECTED_HOMEWORK_STATUS_MESSAGE = 'Неожиданный статус работы: {}'
 NO_NEW_UPDATES_MESSAGE = 'Нет новых обновлений'
-NETWORK_ERROR_MESSAGE = "Сетевая ошибка"
+NETWORK_ERROR_MESSAGE = 'Сетевая ошибка'
+STATUS_CHANGED_MESSAGE = 'Изменился статус проверки работы "{}". {}'
+
+
+class APIRequestError(Exception):
+    pass
 
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
     tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
     missing_tokens = [token for token in tokens if not token]
+    missing_tokens_names = ', '.join([token_name for token_name, token in zip(
+        ['PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID'],
+        tokens
+    ) if not token])
     if missing_tokens:
         logging.critical(
-            MISSING_TOKENS_MESSAGE.format(missing_tokens)
+            f"{MISSING_TOKENS_MESSAGE} {missing_tokens_names}"
         )
-        return False
+        raise EnvironmentError(
+            f"{MISSING_TOKENS_MESSAGE} {missing_tokens_names}"
+        )
     return True
 
 
@@ -70,33 +81,35 @@ def send_message(bot, message):
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logging.debug(BOT_SENT_MESSAGE_TEMPLATE.format(message))
     except Exception as error:
-        logging.exception(SEND_MESSAGE_ERROR_TEMPLATE.format(error))
+        logging.exception(SEND_MESSAGE_ERROR_TEMPLATE.format(error, message))
 
 
 def get_api_answer(timestamp):
     """Делает запрос к API-сервису."""
+    params = {'from_date': timestamp}
+    request_params = dict(url=ENDPOINT, headers=HEADERS, params=params)
+
     try:
-        response = requests.get(
-            ENDPOINT,
-            headers=HEADERS,
-            params={'from_date': timestamp}
-        )
+        response = requests.get(*request_params) 
     except requests.RequestException as error:
-        raise RuntimeError(REQUEST_ERROR_MESSAGE.format(error))
+        raise ConnectionError(
+            REQUEST_ERROR_MESSAGE.format(error=error, *request_params)
+        )
+
     if response.status_code != HTTPStatus.OK:
-        raise HTTPError(
+        raise APIRequestError(
             API_STATUS_CODE_ERROR.format(
                 response.status_code,
-                ENDPOINT,
-                HEADERS,
-                {'from_date': timestamp}
+                *request_params
             )
         )
     json_response = response.json()
     if 'code' in json_response or 'error' in json_response:
-        raise HTTPError(
+        raise APIRequestError(
             API_RESPONSE_ERROR.format(
-                json_response.get('code'), json_response.get('error')
+                json_response.get('code'),
+                json_response.get('error'),
+                *request_params
             )
         )
     return json_response
@@ -105,9 +118,8 @@ def get_api_answer(timestamp):
 def check_response(response):
     """Проверяет ответ API на корректность."""
     if not isinstance(response, dict):
-        raise TypeError(RESPONSE_NOT_DICT_MESSAGE.format(response))
-    expected_keys = {'homeworks'}
-    if not expected_keys.issubset(response):
+        raise TypeError(RESPONSE_NOT_DICT_MESSAGE.format(type(response)))
+    if 'homeworks' not in response:  # Проверяем наличие ключа 'homeworks'
         raise ValueError(RESPONSE_MISSING_KEYS_MESSAGE.format(response))
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
@@ -125,20 +137,40 @@ def parse_status(homework):
     name = homework.get('homework_name')
     status = homework.get('status')
     if 'homework_name' not in homework:
-        raise TypeError(MISSING_HOMEWORK_NAME_MESSAGE.format(homework))
+        raise KeyError(MISSING_HOMEWORK_NAME_MESSAGE)
     if 'status' not in homework:
-        raise TypeError(MISSING_HOMEWORK_STATUS_MESSAGE.format(homework))
+        raise KeyError(MISSING_HOMEWORK_STATUS_MESSAGE)
     if status not in HOMEWORK_VERDICTS:
-        raise TypeError(UNEXPECTED_HOMEWORK_STATUS_MESSAGE.format(status))
-    verdict = HOMEWORK_VERDICTS.get(status)
-    return f'Изменился статус проверки работы "{name}". {verdict}'
+        raise ValueError(UNEXPECTED_HOMEWORK_STATUS_MESSAGE.format(status))
+    return STATUS_CHANGED_MESSAGE.format(name, HOMEWORK_VERDICTS.get(status))
 
 
 def main():
     """Основная логика работы бота."""
-    if not check_tokens():
-        return
-    log_file = os.path.join(os.path.dirname(__file__), 'bot.log')
+    check_tokens()
+    bot = TeleBot(token=TELEGRAM_TOKEN)
+    timestamp = int(time.time())
+    last_error_message = None
+    while True:
+        try:
+            response = get_api_answer(timestamp)
+            homeworks = check_response(response)
+            if homeworks:
+                send_message(bot, parse_status(homeworks[0]))
+                timestamp = response.get('current_date', timestamp)
+            else:
+                logging.debug(NO_NEW_UPDATES_MESSAGE)
+        except Exception as error:
+            error_message = REQUEST_ERROR_MESSAGE.format(error)
+            if error_message != last_error_message:
+                logging.error(error_message)
+                send_message(bot, error_message)
+                last_error_message = error_message
+        time.sleep(RETRY_PERIOD)
+
+
+if __name__ == '__main__':
+    log_file = os.path.join(os.path.dirname(__file__), 'bot.log') 
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
     )
@@ -151,102 +183,4 @@ def main():
         format=formatter,
         handlers=handlers
     )
-    bot = TeleBot(token=TELEGRAM_TOKEN)
-    timestamp = int(time.time())
-    while True:
-        try:
-            response = get_api_answer(timestamp)
-            homeworks = check_response(response)
-            if homeworks:
-                send_message(bot, parse_status(homeworks[0]))
-                timestamp = response.get('current_date', timestamp)
-            else:
-                logging.debug(NO_NEW_UPDATES_MESSAGE)
-        except Exception as error:
-            message = REQUEST_ERROR_MESSAGE.format(error)
-            logging.error(message)
-            send_message(bot, message)
-        time.sleep(RETRY_PERIOD)
-
-
-class TestNetworkError(TestCase):
-    """Проверка обработки ошибки соединения с сетью."""
-
-    @mock.patch('requests.get')
-    def test_network_error(self, mock_get):
-        """Сбой сети.
-
-        Проверяет, что при ошибке соединения с сетью вызывается выход из
-        программы.
-        """
-        mock_get.side_effect = requests.RequestException(NETWORK_ERROR_MESSAGE)
-        main()
-
-
-class TestServerError(TestCase):
-    """Проверка обработки ошибки сервера."""
-
-    @mock.patch('requests.get')
-    def test_server_error(self, mock_get):
-        """Отказ сервера.
-
-        Проверяет, что при ошибке сервера вызывается выход из программы.
-        """
-        mock_response = mock.Mock()
-        mock_response.json.return_value = {'error': 'Ошибка сервера'}
-        mock_get.return_value = mock_response
-        main()
-
-
-class TestUnexpectedStatusCode(TestCase):
-    """Проверка обработки ошибки неожиданного статуса."""
-
-    @mock.patch('requests.get')
-    def test_unexpected_status_code(self, mock_get):
-        """Неожиданный статус ответа (=код-возврата).
-
-        Проверяет, что при получении неожиданного статуса ответа от сервера
-        вызывается выход из программы.
-        """
-        mock_response = mock.Mock()
-        mock_response.status_code = 404
-        mock_get.return_value = mock_response
-        main()
-
-
-class TestUnexpectedHomeworkStatus(TestCase):
-    """Проверка обработки ошибки неожиданного статуса ДЗ."""
-
-    @mock.patch('requests.get')
-    def test_unexpected_homework_status(self, mock_get):
-        """Неожиданный статус домашки.
-
-        Проверяет, что при получении неожиданного статуса ДЗ вызывается выход
-        из программы.
-        """
-        mock_response = mock.Mock()
-        mock_response.json.return_value = {
-            'homeworks': [{'homework_name': 'hw1', 'status': 'unknown'}]
-        }
-        mock_get.return_value = mock_response
-        main()
-
-
-class TestInvalidJson(TestCase):
-    """Проверка обработки ошибки некорректного ответа от сервера."""
-
-    @mock.patch('requests.get')
-    def test_invalid_json(self, mock_get):
-        """Некорректный json.
-
-        Проверяет, что при получении некорректного ответа от сервера
-        (невозможно распарсить JSON) вызывается выход из программы
-        """
-        mock_response = mock.Mock()
-        mock_response.json.return_value = {'homeworks': 1}
-        mock_get.return_value = mock_response
-        main()
-
-
-if __name__ == '__main__':
-    uni_main()
+    main()
